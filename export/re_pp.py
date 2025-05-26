@@ -41,11 +41,11 @@ class EmotionAnalyzer:
                          std=[0.229, 0.224, 0.225])
         ])
         self.emotion_labels = ['기쁨', '당황', '분노', '불안', '상처', '슬픔', '중립']
-
+        # 'haarcascade_frontalface_default.xml': 정면 얼굴을 검출하기 위한 사전 학습된 모델 파일
         self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
         self.recent_emotions = deque(maxlen=30)
 
-        # Placeholder for FACS-related components if needed
+
         # self.facs_model = None
 
         # 한글 폰트 설정
@@ -141,19 +141,6 @@ class EmotionAnalyzer:
         
         if total_weight > 0:
             base_score = total_score / total_weight
-            
-            # 점수 보정 (최소 점수 보장)
-            min_score = 60  # 최소 점수 설정
-            if base_score < min_score:
-                # 낮은 점수에 대해 완화된 보정 적용
-                corrected_score = min_score + (base_score - min_score) * 0.5
-                return min(100, max(min_score, corrected_score))
-            
-            # 높은 점수에 대해 추가 보너스
-            if base_score > 80:
-                bonus = (base_score - 80) * 0.2  # 80점 이상에 대해 20% 보너스
-                return min(100, base_score + bonus)
-            
             return min(100, base_score)
         return 60  # 기본 최소 점수
 
@@ -173,8 +160,10 @@ class EmotionAnalyzer:
             return 'B-'
         elif score >= 60:
             return 'C+'
-        else:
+        elif score >= 55:
             return 'C'
+        else:
+            return 'D'
 
     def draw_korean_text(self, img, text, position, color=(255, 255, 255), font_size=None):
         """한글 텍스트를 이미지에 그리는 함수"""
@@ -291,8 +280,6 @@ class EmotionAnalyzer:
         print(f"평균 감정 점수: {stats['평균 감정 점수']:.1f}/100")
         print(f"최종 등급: {stats['최종 등급']}")
         print("\n감정별 상세 통계:")
-        print("(기쁨: +30%, 중립: +50%, 부정적 감정: -30% 가중치 적용)")
-        print("(최소 점수 60점 보장, 80점 이상 20% 보너스)")
         for emotion, data in stats['감정 분포'].items():
             print(f"\n  {emotion}:")
             print(f"    횟수: {data['횟수']}회 ({data['비율']})")
@@ -302,8 +289,7 @@ class EmotionAnalyzer:
         print("\n등급 기준 (완화된 기준):")
         print("  A+ (90-100점), A (85-89점), A- (80-84점)")
         print("  B+ (75-79점), B (70-74점), B- (65-69점)")
-        print("  C+ (60-64점), C (55-59점), C- (50-54점)")
-        print("  D+ (45-49점), D (40-44점), D- (0-39점)")
+        print("  C+ (60-64점), C (55-59점), D (0-54점)")
         print("========================\n")
 
     def update_recent_emotions(self, emotion_idx):
