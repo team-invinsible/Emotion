@@ -13,7 +13,6 @@ import os
 import json
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
-from models import getModel
 
 def get_font_path():
     """시스템에 설치된 한글 폰트 경로 반환"""
@@ -34,36 +33,20 @@ def get_font_path():
     return None
 
 class EmotionAnalyzer:
-    def __init__(self, device='cuda' if torch.cuda.is_available() else 'cpu', font_path=None, model_path='export/model.pth', model_name='cnn'):
+    def __init__(self, device='cuda' if torch.cuda.is_available() else 'cpu', font_path=None):
         self.device = device
         self.transform = tt.Compose([
-            tt.Grayscale(num_output_channels=1),
-            tt.Resize((48, 48)),
             tt.ToTensor(),
-            tt.Normalize(mean=[0.485], std=[0.229])
+            tt.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225])
         ])
         self.emotion_labels = ['기쁨', '당황', '분노', '불안', '상처', '슬픔', '중립']
-        
-        # 모델 초기화
-        self.model = getModel(model_name)
-        self.model = self.model.to(device)
-        
-        # 모델 가중치 로드
-        if os.path.exists(model_path):
-            state_dict = torch.load(model_path, map_location=device)
-            if isinstance(state_dict, dict) and 'state_dict' in state_dict:
-                self.model.load_state_dict(state_dict['state_dict'])
-            else:
-                self.model.load_state_dict(state_dict)
-            print(f"✓ 모델 가중치를 로드했습니다: {model_path}")
-        else:
-            print(f"⚠️ 모델 가중치 파일을 찾을 수 없습니다: {model_path}")
-        
-        self.model.eval()
-        
-        # 얼굴 검출기 초기화
-        self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcades + 'haarcascade_frontalface_default.xml')
+        # 'haarcascade_frontalface_default.xml': 정면 얼굴을 검출하기 위한 사전 학습된 모델 파일
+        self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
         self.recent_emotions = deque(maxlen=30)
+
+
+        # self.facs_model = None
 
         # 한글 폰트 설정
         self.font = None
@@ -115,13 +98,11 @@ class EmotionAnalyzer:
         }
 
     def preprocess(self, frame):
-        """이미지 전처리 및 얼굴 검출"""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
         return faces
 
     def filter_faces(self, faces, frame_shape):
-        """얼굴 크기 기반 필터링"""
         filtered = []
         h, w = frame_shape[:2]
         for (x, y, fw, fh) in faces:
@@ -130,27 +111,22 @@ class EmotionAnalyzer:
         return filtered
 
     def analyze_emotion(self, face_img):
-        """모델을 사용한 감정 분석"""
-        with torch.no_grad():
-            # 이미지 전처리
-            face_tensor = self.transform(Image.fromarray(face_img))
-            face_tensor = face_tensor.unsqueeze(0).to(self.device)
-            
-            # 모델 추론
-            outputs = self.model(face_tensor)
-            probs = F.softmax(outputs, dim=1)
-            probs = probs.cpu().numpy()[0]
-            
-            # 감정별 가중치 적용
-            weighted_probs = probs * np.array([self.emotion_prob_weights[emotion] for emotion in self.emotion_labels])
-            weighted_probs = weighted_probs / np.sum(weighted_probs)
-            
-            # 감정별 점수 계산
-            scores = {}
-            for i, emotion in enumerate(self.emotion_labels):
-                scores[emotion] = weighted_probs[i] * self.emotion_weights[emotion]
-            
-            return weighted_probs, scores
+        # 기본 확률 계산 (시뮬레이션)
+        probs = F.softmax(torch.randn(len(self.emotion_labels)), dim=0)
+        probs = probs.cpu().numpy()
+        
+        # 감정별 가중치 적용
+        weighted_probs = probs * np.array([self.emotion_prob_weights[emotion] for emotion in self.emotion_labels])
+        
+        # 확률 정규화 (합이 1이 되도록)
+        weighted_probs = weighted_probs / np.sum(weighted_probs)
+        
+        # 감정별 점수 계산
+        scores = {}
+        for i, emotion in enumerate(self.emotion_labels):
+            scores[emotion] = weighted_probs[i] * self.emotion_weights[emotion]
+        
+        return weighted_probs, scores
 
     def calculate_score(self, probs, scores):
         """100점 만점 기준으로 점수 계산 (완화된 기준)"""
@@ -331,8 +307,6 @@ def main():
     parser.add_argument('--video', type=str, default=1, help='Video source (default: 1 for webcam)')
     parser.add_argument('--font_path', help='한글 폰트 파일 경로')
     parser.add_argument('--output_dir', default='results', help='결과 저장 디렉토리')
-    parser.add_argument('--model_path', default='export/model.pth', help='모델 가중치 파일 경로')
-    parser.add_argument('--model_name', default='cnn', help='사용할 모델 이름 (cnn, vgg19, resnet18, emotionnet, resemotionnet, efficientnet-b4, efficientnet-b5)')
     args = parser.parse_args()
 
     # 폰트 경로 확인
@@ -342,11 +316,7 @@ def main():
     else:
         print("⚠️ 한글 폰트를 찾을 수 없습니다. 기본 폰트를 사용합니다.")
 
-    analyzer = EmotionAnalyzer(
-        font_path=font_path,
-        model_path=args.model_path,
-        model_name=args.model_name
-    )
+    analyzer = EmotionAnalyzer(font_path=font_path)
     cap = cv2.VideoCapture(int(args.video) if str(args.video).isdigit() else args.video)
 
     if not cap.isOpened():
