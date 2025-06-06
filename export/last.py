@@ -9,13 +9,24 @@ from PIL import Image
 from models import getModel  
 import os
 import time  # FPS 측정을 위해 추가
+import glob
+from collections import defaultdict
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor
+import threading
 
 # —————————— 사용자 설정 ——————————
-VIDEO_PATH   = '/Users/ijaein/Desktop/Emotion/export/video/화면 기록 2025-05-26 오후 2.45.18.mp4'
+# 다중 동영상 처리 설정
+VIDEO_FOLDER = '/Users/ijaein/Desktop/Emotion/export/video/'  # 비디오 폴더 경로
 MODEL_PATH   = '/Users/ijaein/Desktop/Emotion/model_eff.pth'  # EfficientNet 모델 가중치 파일
 CASCADE_PATH = '/Users/ijaein/Desktop/Emotion/export/face_classifier.xml'
 MODEL_NAME   = 'efficientnet-b5'  # EfficientNet-b5 사용
 IMAGE_SIZE   = 224  
+
+# 처리 방식 설정
+PARALLEL_PROCESSING = True  # True: 병렬처리, False: 순차처리
+MAX_WORKERS = 4              # 병렬 처리시 최대 워커 수 (CPU 코어수에 맞게 조정)
+SHOW_VIDEO = False           # 동영상 화면 표시 여부 (병렬처리시 False 권장)
 
 # 속도 최적화 설정 (시간 기반 버전)
 ANALYSIS_INTERVAL = 1.0  # 1초마다 1번 분석
@@ -28,6 +39,22 @@ USE_LIGHTER_MODEL = False   # 더 가벼운 CNN 모델 사용 (True로 설정하
 # 한글 라벨 
 class_labels = ['기쁨', '당황', '분노', '불안', '상처', '슬픔', '중립']
 # ————————————————————————————————
+
+
+def get_video_files(folder_path):
+    """비디오 파일 목록을 가져오는 함수"""
+    video_extensions = ['*.mp4', '*.avi', '*.mov', '*.mkv', '*.flv', '*.wmv', '*.m4v', '*.webm']
+    
+    if not os.path.isdir(folder_path):
+        print(f"❌ 폴더를 찾을 수 없습니다: {folder_path}")
+        return []
+    
+    video_files = set()  # 중복 제거를 위해 set 사용
+    for ext in video_extensions:
+        # 현재 폴더만 검색 (하위 폴더 제외로 중복 방지)
+        video_files.update(glob.glob(os.path.join(folder_path, ext)))
+    
+    return sorted(list(video_files))
 
 
 def build_model(model_name, ckpt_path):
@@ -51,61 +78,63 @@ def build_model(model_name, ckpt_path):
     return model
 
 
-def main():
-    # 0) 디바이스
-    device = 'cpu'
-    print(f"Using device: {device}")
-    print(f"고속 최적화 설정:")
-    print(f"  - 분석 간격: {ANALYSIS_INTERVAL}초")
-    print(f"  - 재생속도: {PLAYBACK_SPEED}x")
-    print(f"  - 빠른 얼굴검출: {FAST_FACE_DETECTION}")
-    print(f"  - 가벼운 모델: {USE_LIGHTER_MODEL}")
-
-    # 1) 모델 (가벼운 모델 옵션)
-    if USE_LIGHTER_MODEL:
-        model_name = 'cnn'
-        model_path = '/Users/ijaein/Desktop/Emotion/export/model.pth'
-        image_size = 48
-        print("CNN 모델 사용 (빠른 처리)")
-    else:
-        model_name = MODEL_NAME
-        model_path = MODEL_PATH
-        image_size = IMAGE_SIZE
-        print(f"{MODEL_NAME} 모델 사용")
+def process_single_video(video_path):
+    """단일 비디오 처리 함수 (병렬 처리용)"""
+    try:
+        print(f"🎬 처리 시작: {os.path.basename(video_path)}")
+        
+        # 모델 로드 (각 프로세스마다)
+        if USE_LIGHTER_MODEL:
+            model_name = 'cnn'
+            model_path = '/Users/ijaein/Desktop/Emotion/export/model.pth'
+            image_size = 48
+        else:
+            model_name = MODEL_NAME
+            model_path = MODEL_PATH
+            image_size = IMAGE_SIZE
+        
+        model = build_model(model_name, model_path)
+        
+        # 전처리
+        if USE_LIGHTER_MODEL:
+            transform = transforms.Compose([
+                transforms.Grayscale(num_output_channels=1),
+                transforms.Resize((image_size, image_size)),
+                transforms.ToTensor(),
+                transforms.Normalize([0.485], [0.229])
+            ])
+        else:
+            transform = transforms.Compose([
+                transforms.Resize((image_size, image_size)),
+                transforms.ToTensor(),
+                transforms.Normalize([0.485, 0.456, 0.406],
+                                   [0.229, 0.224, 0.225])
+            ])
+        
+        # 얼굴 검출기
+        face_cascade = cv2.CascadeClassifier(CASCADE_PATH)
+        if FAST_FACE_DETECTION:
+            scale_factor = 1.2
+            min_neighbors = 4
+        else:
+            scale_factor = 1.1
+            min_neighbors = 5
+        
+        # 비디오 처리
+        return process_video_core(video_path, model, transform, face_cascade, 
+                                scale_factor, min_neighbors, image_size)
     
-    model = build_model(model_name, model_path)
+    except Exception as e:
+        print(f"❌ {os.path.basename(video_path)} 처리 중 오류: {str(e)}")
+        return None
 
-    # 2) 전처리 (모델에 따라 다르게)
-    if USE_LIGHTER_MODEL:
-        transform = transforms.Compose([
-            transforms.Grayscale(num_output_channels=1),
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485], [0.229])
-        ])
-    else:
-        transform = transforms.Compose([
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406],
-                               [0.229, 0.224, 0.225])
-        ])
 
-    # 3) 얼굴 검출기 (빠른 모드)
-    face_cascade = cv2.CascadeClassifier(CASCADE_PATH)
-    if FAST_FACE_DETECTION:
-        # 빠른 검출을 위한 파라미터 조정 (중복 검출 방지)
-        scale_factor = 1.2  # 더 정밀한 스케일 (이전 1.5에서 1.2로)
-        min_neighbors = 4   # 더 엄격한 이웃 수 (이전 3에서 4로)
-    else:
-        scale_factor = 1.1  # 매우 정밀한 스케일
-        min_neighbors = 5   # 기본값
-
-    # 4) 비디오 열기
-    cap = cv2.VideoCapture(VIDEO_PATH)
+def process_video_core(video_path, model, transform, face_cascade, scale_factor, min_neighbors, image_size):
+    """비디오 처리 핵심 로직"""
+    cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print(f"❌ Cannot open video: {VIDEO_PATH}")
-        return
+        print(f"❌ Cannot open video: {video_path}")
+        return None
 
     # 속도 최적화 변수들
     frame_count = 0
@@ -205,28 +234,126 @@ def main():
             cv2.putText(frame, f'Processed: {processed_frames}/{frame_count}', (20, 90),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
 
-            # 로컬 환경에서 화면 띄우기
-            cv2.imshow('Emotion Analysis (Optimized)', frame)
-
-            # 재생 속도 조절된 대기 시간
-            if cv2.waitKey(delay) & 0xFF == ord('q'):
-                break
+            # 화면 표시 (선택적)
+            if SHOW_VIDEO:
+                cv2.imshow(f'Emotion Analysis - {os.path.basename(video_path)}', frame)
+                # 재생 속도 조절된 대기 시간
+                if cv2.waitKey(delay) & 0xFF == ord('q'):
+                    break
 
     cap.release()
-    cv2.destroyAllWindows()
+    if SHOW_VIDEO:
+        cv2.destroyAllWindows()
     
-    # 최종 통계 출력
+    # 최종 통계
     total_time = time.time() - start_time
     average_fps = processed_frames / total_time if total_time > 0 else 0
     
-    print("-" * 50)
-    print(f"총 실행 시간: {total_time:.1f}초")
-    print(f"총 프레임 수: {frame_count}")
-    print(f"처리된 프레임 수: {processed_frames}")
-    print(f"평균 처리 FPS: {average_fps:.1f}")
-    print(f"처리 효율: {processed_frames/frame_count*100:.1f}% ({ANALYSIS_INTERVAL}초마다 1번)")
-    print(f"이론적 최대 FPS: {fps / frames_per_interval:.1f}")
-    print("-" * 50)
+    print(f"✅ {os.path.basename(video_path)} 완료!")
+    print(f"   처리시간: {total_time:.1f}초, 프레임: {processed_frames}/{frame_count}, FPS: {average_fps:.1f}")
+    
+    # 결과 반환
+    return {
+        'video_path': video_path,
+        'total_time': total_time,
+        'total_frames': frame_count,
+        'processed_frames': processed_frames,
+        'average_fps': average_fps,
+        'success': True
+    }
+
+
+def main():
+    """메인 함수 - 다중 동영상 처리"""
+    print("🎬 다중 동영상 감정 분석 시작")
+    print("=" * 70)
+    
+    # 설정 출력
+    device = 'cpu'
+    print(f"Using device: {device}")
+    print(f"처리 방식: {'병렬 처리' if PARALLEL_PROCESSING else '순차 처리'}")
+    if PARALLEL_PROCESSING:
+        print(f"최대 워커 수: {MAX_WORKERS}")
+    print(f"최적화 설정:")
+    print(f"  - 분석 간격: {ANALYSIS_INTERVAL}초")
+    print(f"  - 재생속도: {PLAYBACK_SPEED}x")
+    print(f"  - 화면 표시: {SHOW_VIDEO}")
+    print(f"  - 빠른 얼굴검출: {FAST_FACE_DETECTION}")
+    print(f"  - 가벼운 모델: {USE_LIGHTER_MODEL}")
+
+    # 비디오 파일 목록 가져오기
+    video_files = get_video_files(VIDEO_FOLDER)
+    if not video_files:
+        print("❌ 처리할 동영상 파일을 찾을 수 없습니다.")
+        return
+    
+    print(f"\n📁 찾은 동영상 파일 ({len(video_files)}개):")
+    for i, video_path in enumerate(video_files, 1):
+        file_size = os.path.getsize(video_path) / (1024*1024)  # MB
+        print(f"  {i}. {os.path.basename(video_path)} ({file_size:.1f}MB)")
+
+    # 처리 시작
+    total_start_time = time.time()
+    results = []
+    
+    if PARALLEL_PROCESSING:
+        # 병렬 처리
+        print(f"\n🚀 병렬 처리 시작 (워커 수: {MAX_WORKERS})")
+        if SHOW_VIDEO:
+            print("⚠️ 병렬 처리시 화면 표시는 비활성화됩니다.")
+        
+        with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = [executor.submit(process_single_video, video_path) 
+                      for video_path in video_files]
+            
+            for future in futures:
+                result = future.result()
+                if result:
+                    results.append(result)
+    
+    else:
+        # 순차 처리
+        print(f"\n📹 순차 처리 시작")
+        for i, video_path in enumerate(video_files, 1):
+            print(f"\n[{i}/{len(video_files)}] 처리 중...")
+            result = process_single_video(video_path)
+            if result:
+                results.append(result)
+    
+    # 전체 결과 요약
+    total_end_time = time.time()
+    total_processing_time = total_end_time - total_start_time
+    
+    print("\n" + "=" * 70)
+    print("🎯 전체 처리 결과 요약")
+    print("=" * 70)
+    print(f"총 처리 시간: {total_processing_time:.1f}초")
+    print(f"처리된 동영상: {len(results)}/{len(video_files)}개")
+    
+    if results:
+        total_frames = sum(r['total_frames'] for r in results)
+        total_processed = sum(r['processed_frames'] for r in results)
+        avg_fps = sum(r['average_fps'] for r in results) / len(results)
+        
+        print(f"총 프레임 수: {total_frames:,}")
+        print(f"처리된 프레임: {total_processed:,}")
+        print(f"전체 처리 효율: {total_processed/total_frames*100:.1f}%")
+        print(f"평균 처리 FPS: {avg_fps:.1f}")
+        
+        if PARALLEL_PROCESSING:
+            theoretical_sequential_time = sum(r['total_time'] for r in results)
+            speedup = theoretical_sequential_time / total_processing_time
+            print(f"병렬 처리 가속도: {speedup:.2f}x")
+        
+        print(f"\n📊 개별 동영상 결과:")
+        for i, result in enumerate(results, 1):
+            video_name = os.path.basename(result['video_path'])
+            print(f"  {i}. {video_name[:40]+'...' if len(video_name) > 40 else video_name}")
+            print(f"     처리시간: {result['total_time']:.1f}초, "
+                  f"프레임: {result['processed_frames']}/{result['total_frames']}, "
+                  f"FPS: {result['average_fps']:.1f}")
+    
+    print("🏁 모든 처리 완료!")
 
 
 if __name__ == "__main__":
