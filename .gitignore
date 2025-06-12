@@ -3,3 +3,6 @@ export/video
 export/myvenv
 model_eff.pth
 mv
+./표정분류_v.2
+./임시파일
+export/model.pth

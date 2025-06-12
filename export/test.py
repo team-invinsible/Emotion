@@ -4,8 +4,7 @@
 import cv2
 import torch
 from torchvision import transforms
-from PIL import Image
-# from google.colab.patches import cv2_imshow  # Colab 전용
+from PIL import Image, ImageFont, ImageDraw
 from models import getModel  
 import os
 import time  # FPS 측정을 위해 추가
@@ -14,19 +13,21 @@ from collections import defaultdict
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor
 import threading
+import numpy as np
 
 # —————————— 사용자 설정 ——————————
 # 다중 동영상 처리 설정
-VIDEO_FOLDER = '/Users/ijaein/Desktop/Emotion/export/video/'  # 비디오 폴더 경로
+# VIDEO_FOLDER = '/Users/ijaein/Desktop/Emotion/export/video/'  # 비디오 폴더 경로
+VIDEO_PATH   = '/Users/ijaein/Desktop/Emotion/export/video/이승무원.mp4' # 단일 비디오 경로 (예시)
 MODEL_PATH   = '/Users/ijaein/Desktop/Emotion/model_eff.pth'  # EfficientNet 모델 가중치 파일
 CASCADE_PATH = '/Users/ijaein/Desktop/Emotion/export/face_classifier.xml'
 MODEL_NAME   = 'efficientnet-b5'  # EfficientNet-b5 사용
 IMAGE_SIZE   = 224  
 
 # 처리 방식 설정
-PARALLEL_PROCESSING = True  # True: 병렬처리, False: 순차처리
+PARALLEL_PROCESSING = False  # 단일 비디오는 순차 처리
 MAX_WORKERS = 4              # 병렬 처리시 최대 워커 수 (CPU 코어수에 맞게 조정)
-SHOW_VIDEO = False           # 동영상 화면 표시 여부 (병렬처리시 False 권장)
+SHOW_VIDEO = True            # 동영상 화면 표시 여부 (단일 비디오는 True 권장)
 
 # 속도 최적화 설정 (시간 기반 버전)
 ANALYSIS_INTERVAL = 1.0  # 1초마다 1번 분석
@@ -53,6 +54,11 @@ EMOTION_MAPPING = {
 # 면접 평가 기준
 POSITIVE_EMOTIONS = ['happy', 'neutral']
 NEGATIVE_EMOTIONS = ['sad', 'angry', 'fear', 'surprise', 'disgust']
+
+# 폰트 설정 (AppleGothic.ttf 경로 및 크기)
+FONT_PATH = '/System/Library/Fonts/AppleGothic.ttf' # AppleGothic 폰트 경로 (macOS 기본 경로)
+FONT_SIZE = 30 # 폰트 크기
+
 # ————————————————————————————————
 
 
@@ -303,6 +309,16 @@ def process_video_core(video_path, model, transform, face_cascade, scale_factor,
     print(f"재생 속도 적용: {fps / frames_per_interval * PLAYBACK_SPEED:.1f} (체감 FPS)")
     print("-" * 50)
 
+    # 폰트 로드
+    try:
+        font = ImageFont.truetype(FONT_PATH, FONT_SIZE)
+        # 작은 폰트 (성능 정보용)
+        font_small = ImageFont.truetype(FONT_PATH, FONT_SIZE - 10) 
+    except IOError:
+        print(f"⚠️ 폰트 파일을 찾을 수 없거나 로드할 수 없습니다: {FONT_PATH}. 기본 폰트를 사용합니다.")
+        font = ImageFont.load_default()
+        font_small = ImageFont.load_default()
+
     with torch.no_grad():
         while True:
             ret, frame = cap.read()
@@ -326,7 +342,11 @@ def process_video_core(video_path, model, transform, face_cascade, scale_factor,
                 fps_frame_count = 0
 
             # (웹캠용이라면 좌우 반전, 동영상이라면 주석 처리)
-            frame = cv2.flip(frame, 1)
+            # frame = cv2.flip(frame, 1) # 이전에 주석 처리되어 있지 않았다면 이 줄도 주석 처리합니다.
+
+            # Convert frame to PIL Image to draw text
+            img_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            draw = ImageDraw.Draw(img_pil)
 
             # 얼굴 검출 (매번 수행 - 단순화)
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -371,22 +391,31 @@ def process_video_core(video_path, model, transform, face_cascade, scale_factor,
                 # 콘솔에도 출력
                 print(f"[Frame {frame_count}] face#{i}: {label}")
 
-                # 화면에 출력
-                cv2.rectangle(frame, (x, y), (x+w, y+h), (0,255,0), 2)
-                cv2.putText(frame, label, (x, y-10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
+                # 화면에 출력 (PIL 사용)
+                # 얼굴 바운딩 박스 그리기 (PIL 사용)
+                draw.rectangle([(x, y), (x+w, y+h)], outline=(0, 255, 0), width=2) # 초록색 테두리
+                
+                # 텍스트 위치 계산 (얼굴 위) - textbbox 사용
+                bbox = draw.textbbox((0, 0), label, font=font)
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
+                text_x = x
+                text_y = y - text_height - 5 # 얼굴 위 5픽셀
+                if text_y < 0: # 화면 상단 벗어나면 얼굴 아래로
+                    text_y = y + h + 5
+
+                draw.text((text_x, text_y), label, font=font, fill=(0, 255, 0, 255)) # 초록색 텍스트 (RGBA)
 
             if len(faces) == 0:
-                cv2.putText(frame, 'No Face Found', (20,60),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,0,255), 2)
+                draw.text((20, 60), 'No Face Found', font=font, fill=(255, 0, 0, 255)) # 빨간색 텍스트
 
-            # 성능 정보 표시
-            cv2.putText(frame, f'Analysis Interval: {ANALYSIS_INTERVAL}s', (20, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
-            cv2.putText(frame, f'Processing FPS: {current_fps:.1f}', (20, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
-            cv2.putText(frame, f'Processed: {processed_frames}/{frame_count}', (20, 90),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
+            # 성능 정보 표시 (PIL 사용)
+            draw.text((20, 30), f'Analysis Interval: {ANALYSIS_INTERVAL}s', font=font_small, fill=(0, 255, 255, 255)) # 청록색 텍스트
+            draw.text((20, 60), f'Processing FPS: {current_fps:.1f}', font=font_small, fill=(0, 255, 255, 255))
+            draw.text((20, 90), f'Processed: {processed_frames}/{frame_count}', font=font_small, fill=(0, 255, 255, 255))
+
+            # PIL Image를 다시 OpenCV (NumPy 배열)로 변환
+            frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
             # 화면 표시 (선택적)
             if SHOW_VIDEO:
@@ -427,17 +456,14 @@ def process_video_core(video_path, model, transform, face_cascade, scale_factor,
     }
 
 
-def main():
-    """메인 함수 - 다중 동영상 처리"""
-    print("🎬 다중 동영상 감정 분석 시작")
+def main(video_path=None):
+    """메인 함수 - 단일 동영상 처리"""
+    print("🎬 단일 동영상 감정 분석 시작")
     print("=" * 70)
     
     # 설정 출력
     device = 'cpu'
     print(f"Using device: {device}")
-    print(f"처리 방식: {'병렬 처리' if PARALLEL_PROCESSING else '순차 처리'}")
-    if PARALLEL_PROCESSING:
-        print(f"최대 워커 수: {MAX_WORKERS}")
     print(f"최적화 설정:")
     print(f"  - 분석 간격: {ANALYSIS_INTERVAL}초")
     print(f"  - 재생속도: {PLAYBACK_SPEED}x")
@@ -445,98 +471,50 @@ def main():
     print(f"  - 빠른 얼굴검출: {FAST_FACE_DETECTION}")
     print(f"  - 가벼운 모델: {USE_LIGHTER_MODEL}")
 
-    # 비디오 파일 목록 가져오기
-    video_files = get_video_files(VIDEO_FOLDER)
-    if not video_files:
-        print("❌ 처리할 동영상 파일을 찾을 수 없습니다.")
+    # 비디오 경로 설정
+    if video_path is None:
+        video_path = VIDEO_PATH # 기본 경로 사용
+
+    if not os.path.exists(video_path):
+        print(f"❌ 동영상 파일을 찾을 수 없습니다: {video_path}")
         return
     
-    print(f"\n📁 찾은 동영상 파일 ({len(video_files)}개):")
-    for i, video_path in enumerate(video_files, 1):
-        file_size = os.path.getsize(video_path) / (1024*1024)  # MB
-        print(f"  {i}. {os.path.basename(video_path)} ({file_size:.1f}MB)")
+    print(f"\n📁 처리할 동영상 파일: {os.path.basename(video_path)}")
+    file_size = os.path.getsize(video_path) / (1024*1024)  # MB
+    print(f"  크기: {file_size:.1f}MB")
 
     # 처리 시작
     total_start_time = time.time()
-    results = []
-    
-    if PARALLEL_PROCESSING:
-        # 병렬 처리
-        print(f"\n🚀 병렬 처리 시작 (워커 수: {MAX_WORKERS})")
-        if SHOW_VIDEO:
-            print("⚠️ 병렬 처리시 화면 표시는 비활성화됩니다.")
-        
-        with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = [executor.submit(process_single_video, video_path) 
-                      for video_path in video_files]
-            
-            for future in futures:
-                result = future.result()
-                if result:
-                    results.append(result)
-    
-    else:
-        # 순차 처리
-        print(f"\n📹 순차 처리 시작")
-        for i, video_path in enumerate(video_files, 1):
-            print(f"\n[{i}/{len(video_files)}] 처리 중...")
-            result = process_single_video(video_path)
-            if result:
-                results.append(result)
+    result = process_single_video(video_path)
     
     # 전체 결과 요약
     total_end_time = time.time()
     total_processing_time = total_end_time - total_start_time
     
     print("\n" + "=" * 70)
-    print("🎯 전체 처리 결과 요약")
+    print("🎯 처리 결과 요약")
     print("=" * 70)
     print(f"총 처리 시간: {total_processing_time:.1f}초")
-    print(f"처리된 동영상: {len(results)}/{len(video_files)}개")
     
-    if results:
-        total_frames = sum(r['total_frames'] for r in results)
-        total_processed = sum(r['processed_frames'] for r in results)
-        avg_fps = sum(r['average_fps'] for r in results) / len(results)
+    if result and result['success']:
+        video_name = os.path.basename(result['video_path'])
+        print(f"  {video_name[:40]+'...' if len(video_name) > 40 else video_name}")
+        print(f"     처리시간: {result['total_time']:.1f}초, "
+              f"프레임: {result['processed_frames']}/{result['total_frames']}, "
+              f"FPS: {result['average_fps']:.1f}")
         
-        print(f"총 프레임 수: {total_frames:,}")
-        print(f"처리된 프레임: {total_processed:,}")
-        print(f"전체 처리 효율: {total_processed/total_frames*100:.1f}%")
-        print(f"평균 처리 FPS: {avg_fps:.1f}")
-        
-        if PARALLEL_PROCESSING:
-            theoretical_sequential_time = sum(r['total_time'] for r in results)
-            speedup = theoretical_sequential_time / total_processing_time
-            print(f"병렬 처리 가속도: {speedup:.2f}x")
-        
-        print(f"\n📊 개별 동영상 결과:")
-        for i, result in enumerate(results, 1):
-            video_name = os.path.basename(result['video_path'])
-            print(f"  {i}. {video_name[:40]+'...' if len(video_name) > 40 else video_name}")
-            print(f"     처리시간: {result['total_time']:.1f}초, "
-                  f"프레임: {result['processed_frames']}/{result['total_frames']}, "
-                  f"FPS: {result['average_fps']:.1f}")
-            
-            # 면접 점수 표시
-            if 'interview_score' in result and result['interview_score'] > 0:
-                score = result['interview_score']
-                grade = get_grade(score)
-                print(f"     🎯 면접점수: {score:.1f}/60점 ({grade})")
-        
-        # 전체 면접 결과 요약
-        valid_scores = [r['interview_score'] for r in results if r.get('interview_score', 0) > 0]
-        if valid_scores:
-            avg_score = sum(valid_scores) / len(valid_scores)
-            best_score = max(valid_scores)
-            worst_score = min(valid_scores)
-            
-            print(f"\n🎯 **전체 면접 평가 요약:**")
-            print(f"  평균 점수: {avg_score:.1f}/60점 ({get_grade(avg_score)})")
-            print(f"  최고 점수: {best_score:.1f}/60점 ({get_grade(best_score)})")
-            print(f"  최저 점수: {worst_score:.1f}/60점 ({get_grade(worst_score)})")
+        # 면접 점수 표시
+        if 'interview_score' in result and result['interview_score'] > 0:
+            score = result['interview_score']
+            grade = get_grade(score)
+            print(f"     🎯 면접점수: {score:.1f}/60점 ({grade})")
+    else:
+        print("❌ 동영상 처리 실패")
     
-    print("🏁 모든 처리 완료!")
+    print("🏁 처리 완료!")
 
 
 if __name__ == "__main__":
+    # 여기에서 처리할 단일 동영상 파일 경로를 지정하거나, 기본값(VIDEO_PATH)을 사용합니다.
+    # 예시: main('/Users/ijaein/Desktop/Emotion/export/video/my_interview.mp4')
     main()
