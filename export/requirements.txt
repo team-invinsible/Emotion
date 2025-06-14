@@ -6,3 +6,6 @@ moviepy>=1.0.3
 Pillow>=10.0.0 
 imageio-ffmpeg
 scipy
+pymysql>=1.0.2
+cv2
+pythorch

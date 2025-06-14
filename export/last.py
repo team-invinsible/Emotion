@@ -1,12 +1,9 @@
-#!/usr/bin/env python
-# coding: utf-8
-
 import cv2
 import torch
 from torchvision import transforms
 from PIL import Image
 # from google.colab.patches import cv2_imshow  # Colab 전용
-from models import getModel  
+from models.efficientnet import EfficientNet
 import os
 import time  # FPS 측정을 위해 추가
 import glob
@@ -19,7 +16,7 @@ import json  # JSON 파일 저장을 위해 추가
 # —————————— 사용자 설정 ——————————
 # 다중 동영상 처리 설정
 VIDEO_FOLDER = '/Users/ijaein/Desktop/Emotion/export/video/'  # 비디오 폴더 경로
-MODEL_PATH   = '/Users/ijaein/Desktop/Emotion/model_eff.pth'  # EfficientNet 모델 가중치 파일
+MODEL_PATH   = '/Users/ijaein/Desktop/Emotion/export/model_eff.pth'  # EfficientNet 모델 가중치 파일
 CASCADE_PATH = '/Users/ijaein/Desktop/Emotion/export/face_classifier.xml'
 MODEL_NAME   = 'efficientnet-b5'  # EfficientNet-b5 사용
 IMAGE_SIZE   = 224  
@@ -34,8 +31,7 @@ ANALYSIS_INTERVAL = 1  # 1초마다 1번 분석
 PLAYBACK_SPEED = 5     # 비디오 재생 속도 (5배속)
 
 # 추가 최적화 옵션들
-FAST_FACE_DETECTION = True  # 빠른 얼굴 검출 모드
-USE_LIGHTER_MODEL = False   # 더 가벼운 CNN 모델 사용 (True로 설정하면 CNN 사용)
+FAST_FACE_DETECTION = True  # 빠른 얼굴 검출 모드 (가장 큰 얼굴 하나만 검출)
 
 # 한글 라벨 
 class_labels = ['기쁨', '당황', '분노', '불안', '상처', '슬픔', '중립']
@@ -208,9 +204,15 @@ def get_improvement_suggestions(analysis):
     return suggestions
 
 
-def build_model(model_name, ckpt_path):
-    # 모델 생성
-    model = getModel(model_name)
+def build_efficientnet_model(model_name, ckpt_path):
+    """EfficientNet 모델만 생성하는 함수"""
+    # EfficientNet 모델 생성
+    if model_name.lower() in ['efficientnet-b4', 'efficientnet-b5']:
+        model = EfficientNet.from_name(model_name.lower(), num_classes=7)  # 감정 7개 클래스
+        print(f"EfficientNet 모델 생성: {model_name}")
+    else:
+        print(f"지원하지 않는 모델명: {model_name}. EfficientNet-B5를 사용합니다.")
+        model = EfficientNet.from_name('efficientnet-b5', num_classes=7)
     
     # 체크포인트 로드 (가중치 파일이 있는 경우만)
     try:
@@ -234,33 +236,20 @@ def process_single_video(video_path):
     try:
         print(f"처리 시작: {os.path.basename(video_path)}")
         
-        # 모델 로드 (각 프로세스마다)
-        if USE_LIGHTER_MODEL:
-            model_name = 'cnn'
-            model_path = '/Users/ijaein/Desktop/Emotion/export/model.pth'
-            image_size = 48
-        else:
-            model_name = MODEL_NAME
-            model_path = MODEL_PATH
-            image_size = IMAGE_SIZE
+        # EfficientNet 모델 로드 (각 프로세스마다)
+        model_name = MODEL_NAME
+        model_path = MODEL_PATH
+        image_size = IMAGE_SIZE
         
-        model = build_model(model_name, model_path)
+        model = build_efficientnet_model(model_name, model_path)
         
-        # 전처리
-        if USE_LIGHTER_MODEL:
-            transform = transforms.Compose([
-                transforms.Grayscale(num_output_channels=1),
-                transforms.Resize((image_size, image_size)),
-                transforms.ToTensor(),
-                transforms.Normalize([0.485], [0.229])
-            ])
-        else:
-            transform = transforms.Compose([
-                transforms.Resize((image_size, image_size)),
-                transforms.ToTensor(),
-                transforms.Normalize([0.485, 0.456, 0.406],
-                                   [0.229, 0.224, 0.225])
-            ])
+        # EfficientNet용 전처리
+        transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406],
+                               [0.229, 0.224, 0.225])
+        ])
         
         # 얼굴 검출기
         face_cascade = cv2.CascadeClassifier(CASCADE_PATH)
@@ -338,24 +327,16 @@ def process_video_core(video_path, model, transform, face_cascade, scale_factor,
             # (웹캠용이라면 좌우 반전, 동영상이라면 주석 처리)
             frame = cv2.flip(frame, 1)
 
-            # 얼굴 검출 (매번 수행 - 단순화)
+            # 얼굴 검출 (하나만 검출)
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             detected_faces = face_cascade.detectMultiScale(gray, scale_factor, min_neighbors)
             
-            # 중복 얼굴 제거 및 가장 큰 얼굴만 선택
+            # 가장 큰 얼굴 하나만 선택
             if len(detected_faces) > 0:
-                # 얼굴 크기(면적) 기준으로 정렬하여 가장 큰 얼굴만 선택
-                faces_with_area = [(x, y, w, h, w*h) for x, y, w, h in detected_faces]
-                faces_with_area.sort(key=lambda x: x[4], reverse=True)  # 면적 기준 내림차순
+                # 얼굴 크기(면적) 기준으로 가장 큰 얼굴 선택
+                largest_face = max(detected_faces, key=lambda face: face[2] * face[3])
+                x, y, w, h = largest_face
                 
-                # 가장 큰 얼굴만 선택 (중복 제거)
-                largest_face = faces_with_area[0]
-                faces = [(largest_face[0], largest_face[1], largest_face[2], largest_face[3])]
-            else:
-                faces = []
-
-            # 얼굴 하나씩 처리
-            for i, (x, y, w, h) in enumerate(faces):
                 # ROI 자르고 PIL→Tensor
                 face = frame[y:y+h, x:x+w]
                 face = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
@@ -379,15 +360,14 @@ def process_video_core(video_path, model, transform, face_cascade, scale_factor,
                 })
 
                 # 콘솔에도 출력
-                print(f"[Frame {frame_count}] face#{i}: {label}")
+                print(f"[Frame {frame_count}] {label}")
 
                 # 화면에 출력
                 cv2.rectangle(frame, (x, y), (x+w, y+h), (0,255,0), 2)
                 cv2.putText(frame, label, (x, y-10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
-
-            if len(faces) == 0:
-                cv2.putText(frame, 'No Face Found', (20,60),
+            else:
+                cv2.putText(frame, 'No Face Found', (20,120),
                             cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,0,255), 2)
 
             # 성능 정보 표시
@@ -452,8 +432,8 @@ def main():
     print(f"  - 분석 간격: {ANALYSIS_INTERVAL}초")
     print(f"  - 재생속도: {PLAYBACK_SPEED}x")
     print(f"  - 화면 표시: {SHOW_VIDEO}")
-    print(f"  - 빠른 얼굴검출: {FAST_FACE_DETECTION}")
-    print(f"  - 가벼운 모델: {USE_LIGHTER_MODEL}")
+    print(f"  - 얼굴 검출: 가장 큰 얼굴 하나만")
+    print(f"  - 모델: EfficientNet-B5")
 
     # 비디오 파일 목록 가져오기
     video_files = get_video_files(VIDEO_FOLDER)
