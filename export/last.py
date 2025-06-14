@@ -3,7 +3,7 @@ import torch
 from torchvision import transforms
 from PIL import Image
 # from google.colab.patches import cv2_imshow  # Colab 전용
-from models.efficientnet import EfficientNet
+from models import getModel  
 import os
 import time  # FPS 측정을 위해 추가
 import glob
@@ -31,7 +31,8 @@ ANALYSIS_INTERVAL = 1  # 1초마다 1번 분석
 PLAYBACK_SPEED = 5     # 비디오 재생 속도 (5배속)
 
 # 추가 최적화 옵션들
-FAST_FACE_DETECTION = True  # 빠른 얼굴 검출 모드 (가장 큰 얼굴 하나만 검출)
+FAST_FACE_DETECTION = True  # 빠른 얼굴 검출 모드
+USE_LIGHTER_MODEL = False   # 더 가벼운 CNN 모델 사용 (True로 설정하면 CNN 사용)
 
 # 한글 라벨 
 class_labels = ['기쁨', '당황', '분노', '불안', '상처', '슬픔', '중립']
@@ -204,15 +205,9 @@ def get_improvement_suggestions(analysis):
     return suggestions
 
 
-def build_efficientnet_model(model_name, ckpt_path):
-    """EfficientNet 모델만 생성하는 함수"""
-    # EfficientNet 모델 생성
-    if model_name.lower() in ['efficientnet-b4', 'efficientnet-b5']:
-        model = EfficientNet.from_name(model_name.lower(), num_classes=7)  # 감정 7개 클래스
-        print(f"EfficientNet 모델 생성: {model_name}")
-    else:
-        print(f"지원하지 않는 모델명: {model_name}. EfficientNet-B5를 사용합니다.")
-        model = EfficientNet.from_name('efficientnet-b5', num_classes=7)
+def build_model(model_name, ckpt_path):
+    # 모델 생성
+    model = getModel(model_name)
     
     # 체크포인트 로드 (가중치 파일이 있는 경우만)
     try:
@@ -236,20 +231,33 @@ def process_single_video(video_path):
     try:
         print(f"처리 시작: {os.path.basename(video_path)}")
         
-        # EfficientNet 모델 로드 (각 프로세스마다)
-        model_name = MODEL_NAME
-        model_path = MODEL_PATH
-        image_size = IMAGE_SIZE
+        # 모델 로드 (각 프로세스마다)
+        if USE_LIGHTER_MODEL:
+            model_name = 'cnn'
+            model_path = '/Users/ijaein/Desktop/Emotion/export/model.pth'
+            image_size = 48
+        else:
+            model_name = MODEL_NAME
+            model_path = MODEL_PATH
+            image_size = IMAGE_SIZE
         
-        model = build_efficientnet_model(model_name, model_path)
+        model = build_model(model_name, model_path)
         
-        # EfficientNet용 전처리
-        transform = transforms.Compose([
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406],
-                               [0.229, 0.224, 0.225])
-        ])
+        # 전처리
+        if USE_LIGHTER_MODEL:
+            transform = transforms.Compose([
+                transforms.Grayscale(num_output_channels=1),
+                transforms.Resize((image_size, image_size)),
+                transforms.ToTensor(),
+                transforms.Normalize([0.485], [0.229])
+            ])
+        else:
+            transform = transforms.Compose([
+                transforms.Resize((image_size, image_size)),
+                transforms.ToTensor(),
+                transforms.Normalize([0.485, 0.456, 0.406],
+                                   [0.229, 0.224, 0.225])
+            ])
         
         # 얼굴 검출기
         face_cascade = cv2.CascadeClassifier(CASCADE_PATH)
@@ -432,8 +440,8 @@ def main():
     print(f"  - 분석 간격: {ANALYSIS_INTERVAL}초")
     print(f"  - 재생속도: {PLAYBACK_SPEED}x")
     print(f"  - 화면 표시: {SHOW_VIDEO}")
-    print(f"  - 얼굴 검출: 가장 큰 얼굴 하나만")
-    print(f"  - 모델: EfficientNet-B5")
+    print(f"  - 빠른 얼굴검출: {FAST_FACE_DETECTION}")
+    print(f"  - 가벼운 모델: {USE_LIGHTER_MODEL}")
 
     # 비디오 파일 목록 가져오기
     video_files = get_video_files(VIDEO_FOLDER)
